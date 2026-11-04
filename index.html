@@ -39,13 +39,6 @@ window.claude = {
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
 </script>
-<style>
-/* room for the iPhone status bar when the app runs full screen */
-:root{padding-top:env(safe-area-inset-top,0px)}
-.page .screen{padding-top:calc(14px + env(safe-area-inset-top,0px))}
-html{-webkit-text-size-adjust:100%}
-body{overscroll-behavior-y:none;-webkit-tap-highlight-color:transparent}
-</style>
 <title>NEXORA</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -556,6 +549,18 @@ kbd{font:500 11px var(--f);padding:2px 6px;border-radius:6px;border:1px solid va
 .avatar canvas{display:block}
 </style>
 
+<style>
+/* Phone app only. Inserted AFTER the app's own styles so these rules win.
+   In full screen the iPhone status bar (time, battery) sits on top of the page:
+   everything that starts at the very top of the screen gets that height added. */
+:root{padding-top:env(safe-area-inset-top,0px)}
+.page .screen{padding-top:calc(14px + env(safe-area-inset-top,0px))}
+/* the back button stays reachable while scrolling a long page */
+.page .phead{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;margin-top:-6px;padding-top:6px;background:linear-gradient(var(--bg) 70%,transparent)}
+.cmdk{padding-top:calc(max(10vh,24px) + env(safe-area-inset-top,0px))}
+html{-webkit-text-size-adjust:100%}
+body{overscroll-behavior-y:none;-webkit-tap-highlight-color:transparent}
+</style>
 </head>
 <body>
 <main id="main" class="screen"></main>
