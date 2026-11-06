@@ -574,8 +574,7 @@ body{overscroll-behavior-y:none;-webkit-tap-highlight-color:transparent}
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const LS = 'mes-moyennes-v1', LS_SYNC = 'mes-moyennes-synced';
-const COEFS = [0.5,1,1.5,2,2.5,3,3.5,4];
-const PALETTE = ['#5AA2FF','#FF6FA8','#3DDC97','#FFB547','#B48CFF','#3FD4E0','#FF7A59','#A6E05A','#E58BFF','#7FA8D8','#E8C35A','#56C9A0','#9C8CFF','#FF9D6B','#62C3FF','#D9A27F'];
+const COEFS = [0.5,1,1.5,2,2.5,3,3.5,4];const PALETTE = ['#5AA2FF','#FF6FA8','#3DDC97','#FFB547','#B48CFF','#3FD4E0','#FF7A59','#A6E05A','#E58BFF','#7FA8D8','#E8C35A','#56C9A0','#9C8CFF','#FF9D6B','#62C3FF','#D9A27F'];
 const DAY = 86400000;
 const r1 = x => Math.round(x * 10 + 1e-7) / 10;
 const f1 = x => (x == null || isNaN(x)) ? '–' : x.toFixed(1);
@@ -728,9 +727,22 @@ function notesOf(bid, p, extra = [], upto = null){
   return state.notes.concat(extra).filter(n => n.branchId === bid && (p === 'Y' || semOf(n.date) === p) && (!upto || n.date <= upto));
 }
 function wavg(ns){ if (!ns.length) return null; let a = 0, c = 0; for (const n of ns){ a += n.value * n.coef; c += n.coef; } return r1(a / c); }
+/* One subject over one semester, not rounded. A grade can carry a percentage (n.pct) instead of a
+   coefficient: it then makes exactly that share of the semester average, and the grades with a
+   coefficient share what is left. Until there is a grade with a coefficient (or if the percentages
+   reach 100), the percentages alone make the average. */
+function semRaw(ns){
+  let a = 0, c = 0, pa = 0, P = 0;
+  for (const n of ns){ if (n.pct){ pa += n.value * n.pct; P += n.pct; } else { a += n.value * n.coef; c += n.coef; } }
+  if (!c && !P) return null;
+  if (!P) return a / c;
+  if (!c || P >= 100) return pa / P;
+  return (pa + (100 - P) * a / c) / 100;
+}
+const semAvg = ns => { const x = semRaw(ns); return x == null ? null : r1(x); };
 function bAvg(bid, p, extra = [], upto = null){
-  if (p === 'Y'){ const a = wavg(notesOf(bid,1,extra,upto)), b = wavg(notesOf(bid,2,extra,upto)); return a == null ? b : b == null ? a : r1((a + b) / 2); }
-  return wavg(notesOf(bid, p, extra, upto));
+  if (p === 'Y'){ const a = semAvg(notesOf(bid,1,extra,upto)), b = semAvg(notesOf(bid,2,extra,upto)); return a == null ? b : b == null ? a : r1((a + b) / 2); }
+  return semAvg(notesOf(bid, p, extra, upto));
 }
 const mean = arr => { const v = arr.filter(x => x != null); return v.length ? r1(v.reduce((s,x) => s + x, 0) / v.length) : null; };
 const genAvg = (p, extra = [], mainOnly = false, upto = null) => mean(state.branches.filter(b => !mainOnly || b.main).map(b => bAvg(b.id, p, extra, upto)));
@@ -746,16 +758,20 @@ function trendHtml(d){
   if (d < 0) return `<span class="trend down">−${Math.abs(d).toFixed(1)}</span>`;
   return `<span class="trend flat">±0.0</span>`;
 }
-function neededNote(bid, target, coef, p){
+/* w: the next test's weight, a coefficient (number) or {coef, pct} */
+function neededNote(bid, target, w, p){
+  const wt = typeof w === 'number' ? {coef: w} : {coef: w.coef, pct: w.pct};
   const sem = p === 'Y' ? curSem() : p;
   let tg = target;
   if (p === 'Y' && sem === 2){ const a1 = bAvg(bid, 1); if (a1 != null) tg = Math.ceil((2 * target - 0.1 - a1) * 10 - 1e-7) / 10; }
-  let a = 0, c = 0; for (const n of notesOf(bid, sem)){ a += n.value * n.coef; c += n.coef; }
-  return Math.ceil((((tg - 0.05) * (c + coef) - a) / coef) * 10 - 1e-7) / 10;
+  /* the average is a straight line in the next grade x: two points are enough to solve it */
+  const ns = notesOf(bid, sem), at = x => semRaw(ns.concat([{value: x, ...wt}]));
+  const a0 = at(0), a1 = at(1);
+  return Math.ceil(((tg - 0.05 - a0) / (a1 - a0)) * 10 - 1e-7) / 10;
 }
 function mgFrom(list, p){
   return mean(state.branches.map(b => {
-    const f = s => wavg(list.filter(n => n.branchId === b.id && semOf(n.date) === s));
+    const f = s => semAvg(list.filter(n => n.branchId === b.id && semOf(n.date) === s));
     if (p === 'Y'){ const a = f(1), c = f(2); return a == null ? c : c == null ? a : r1((a + c) / 2); }
     return f(p);
   }));
@@ -884,8 +900,8 @@ let tab = 'home';
 const pages = [];
 const TABS = [['home','Accueil','home'],['notes','Notes','notes'],['cal','Calendrier','cal'],['goals','Objectifs','target'],['profile','Profil','user']];
 function go(tb){ tab = tb; pages.length = 0; renderAll(); window.scrollTo(0, 0); }
-function push(p){ pages.push(p); renderAll(); $('#page').scrollTop = 0; }
-function pop(){ pages.pop(); renderAll(); }
+function push(p){ if (cur()) cur()._st = $('#page').scrollTop; pages.push(p); renderAll(); $('#page').scrollTop = 0; }
+function pop(){ pages.pop(); renderAll(); const p = cur(); if (p && p._st != null) $('#page').scrollTop = p._st; }
 const cur = () => pages[pages.length - 1];
 let toastT;
 function toast(m){ const el = $('#toast'); el.textContent = m; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => el.hidden = true, 2600); }
@@ -900,7 +916,7 @@ function renderAll(){
     page.innerHTML = `<div class="screen">${pg.render(pg)}</div>`;
     const wasHidden = page.hidden; page.hidden = false; if (!wasHidden) page.scrollTop = st;
     document.body.classList.add('paged');
-  } else { page.hidden = true; page.innerHTML = ''; document.body.classList.remove('paged'); }
+  } else { page.hidden = true; page.innerHTML = ''; page.style.animation = ''; document.body.classList.remove('paged'); }
   $('#fab').innerHTML = ui('plus', 28, 2);
   $('#fab').setAttribute('aria-label', t('Ajout rapide'));
 }
@@ -914,14 +930,17 @@ function subjRow(b, p, sub){
     <span class="t"><b>${esc(b.name)}${b.main ? `<span class="mp-dot" title="${t('Matière principale')}"></span>` : ''}</b><small>${sub}</small></span>
     <span class="v num ${gcls(a)}">${f1(a)}<span class="of"> / 6</span></span>${chevron()}</button>`;
 }
-function stepperHtml(act, val){
-  return `<div class="card stepper"><button class="sb" data-act="${act}" data-v="-1" aria-label="${t('Moins')}">${ui('minus', 18, 2)}</button><div class="sv"><span style="font-size:28px;font-weight:300" class="num">${fn(val)}</span></div><button class="sb" data-act="${act}" data-v="1" aria-label="${t('Plus')}">${ui('plus', 18, 2)}</button></div>`;
+function stepperHtml(act, val, txt){
+  return `<div class="card stepper"><button class="sb" data-act="${act}" data-v="-1" aria-label="${t('Moins')}">${ui('minus', 18, 2)}</button><div class="sv"><span style="font-size:28px;font-weight:300" class="num">${txt ?? fn(val)}</span></div><button class="sb" data-act="${act}" data-v="1" aria-label="${t('Plus')}">${ui('plus', 18, 2)}</button></div>`;
 }
 const opts = sel => state.branches.map(b => `<option value="${b.id}" ${b.id === sel ? 'selected' : ''}>${esc(b.name)}</option>`).join('');
 const firstName = () => (state.profile.first || '').trim();
 const isBirthday = () => !!state.profile.birth && state.profile.birth.slice(5) === today().slice(5);
 const avatarIn = s => firstName() ? esc(firstName()[0].toUpperCase()) : ui('user', s);
 const coefTxt = c => t('coef {c}', {c: fn(c)});
+/* a grade's weight: its percentage of the semester average if it has one, else its coefficient */
+const weightTxt = n => n.pct ? t('{p} % de la moyenne', {p: n.pct}) : coefTxt(n.coef);
+const pctState = p => t('{p} % de la moyenne du semestre. Les notes avec coefficient se partagent le reste.', {p});
 
 /* ================= greeting: a new one each time the app is opened ================= */
 /* only four greetings: the one for the time of day (morning 5–12 h, afternoon 12–18 h, evening 18–5 h) or "welcome back", half the time each */
@@ -952,7 +971,7 @@ const pendingEvals = () => state.events.filter(e => e.kind === 'eval' && e.date 
 function evIcon(e){ const b = getB(e.branchId); return `<span class="ico" style="color:${evColor(e)};border-color:${evColor(e)}66">${b && e.kind !== 'autre' ? subjIcon(b) : ui(e.kind === 'autre' ? 'bell' : 'doc', 20)}</span>`; }
 function evSub(e){
   const b = getB(e.branchId);
-  return [b ? b.name : '', e.kind === 'eval' ? `${TYPES()[e.type] || ''} · ${coefTxt(e.coef || 1)}` : '', e.details || ''].filter(Boolean).join(' · ');
+  return [b ? b.name : '', e.kind === 'eval' ? `${TYPES()[e.type] || ''} · ${weightTxt({coef: e.coef || 1, pct: e.pct})}` : '', e.details || ''].filter(Boolean).join(' · ');
 }
 function evRow(e){
   const done = e.kind === 'devoir' && e.done, sub = evSub(e);
@@ -994,7 +1013,7 @@ SCREENS.home = () => {
   ${weekCardHtml()}
   ${pend.length ? `<h2 class="h2">${t('Tu as eu combien ?')}</h2><div>${pend.slice(0, 3).map(e => `<div class="srow card" style="grid-template-columns:44px 1fr auto auto">
       <span class="ico">${subjIcon(getB(e.branchId))}</span>
-      <span class="t"><b>${esc(evTitle(e))} · ${esc(getB(e.branchId).name)}</b><small>${dayName(e.date)} · ${coefTxt(e.coef || 1)}</small></span>
+      <span class="t"><b>${esc(evTitle(e))} · ${esc(getB(e.branchId).name)}</b><small>${dayName(e.date)} · ${weightTxt({coef: e.coef || 1, pct: e.pct})}</small></span>
       <button class="btn primary sm" data-act="fill-eval" data-id="${e.id}" style="padding:0 14px">${t('Entrer')}</button>
       <button class="iconbtn" data-act="skip-eval" data-id="${e.id}" aria-label="${t('Ignorer')}">${ui('x', 16, 2)}</button></div>`).join('')}</div>` : ''}
   <h2 class="h2">${t('Cette semaine')} <button data-act="tab" data-t="cal" aria-label="${t('Calendrier')}">${ui('chev', 16, 2)}</button></h2>
@@ -1020,7 +1039,7 @@ SCREENS.notes = () => {
   } else if (notesTab === 'all'){
     const ns = periodNotes(p).slice().sort((a,b) => a.date < b.date ? 1 : -1);
     body = ns.length ? `<div>${ns.map(n => { const b = getB(n.branchId); return `<button class="srow card" data-act="edit-note" data-id="${n.id}"><span class="ico">${subjIcon(b)}</span>
-      <span class="t"><b>${esc(b ? b.name : '?')}</b><small>${TYPES()[n.type] || ''} · ${coefTxt(n.coef)}${n.comment ? ' · ' + esc(n.comment) : ''}</small></span>
+      <span class="t"><b>${esc(b ? b.name : '?')}</b><small>${TYPES()[n.type] || ''} · ${weightTxt(n)}${n.comment ? ' · ' + esc(n.comment) : ''}</small></span>
       <span class="v num ${gcls(n.value)}">${fn(n.value)}<span class="of"> / 6</span><small>${dmy(n.date)}</small></span>${chevron()}</button>`; }).join('')}</div>`
       : `<p class="empty">${t('Aucune note pour cette période.')}</p>`;
   } else {
@@ -1063,8 +1082,9 @@ SCREENS.cal = () => {
     ${upcoming.length ? `<div>${upcoming.map(evRow).join('')}</div>` : `<p class="hint">${t('Rien de prévu après ce jour.')}</p>`}${timelineHtml()}`;
 };
 
-let goalsTab = 'goals', goalCoef = 1;
-const sim = {items: [], branchId: null, value: '', coef: 1, err: '', q: {branchId: null, target: '', coef: 1}};
+let goalsTab = 'goals';
+const goalW = {coef: 1, pct: 0};
+const sim = {items: [], branchId: null, value: '', coef: 1, pct: 0, err: '', q: {branchId: null, target: '', coef: 1, pct: 0}};
 function goalCard(g){
   const finished = g.period === 1 && curSem() === 2;
   const lines = g.kind === 'branch' ? g.branchIds.filter(getB).map(id => ({id, name: getB(id).name, v: bAvg(id, g.period)}))
@@ -1078,8 +1098,8 @@ function goalCard(g){
       let need = '';
       if (l.v == null) need = t('Pas encore de note.');
       else if (l.id && !finished){
-        const ne = nextEval(l.id, g.period), coef = ne ? (ne.coef || 1) : goalCoef, n = neededNote(l.id, g.target, coef, g.period);
-        const when = ne ? t('Prochain test le {d} ({c})', {d: dmy(ne.date), c: coefTxt(coef)}) : t('Prochain test ({c})', {c: coefTxt(coef)});
+        const ne = nextEval(l.id, g.period), w = ne ? {coef: ne.coef || 1, pct: ne.pct || 0} : goalW, n = neededNote(l.id, g.target, w, g.period);
+        const when = ne ? t('Prochain test le {d} ({c})', {d: dmy(ne.date), c: weightTxt(w)}) : t('Prochain test ({c})', {c: weightTxt(w)});
         need = n <= 1 ? t('{w} : déjà assuré.', {w: when}) : n > 6 ? t('{w} : pas atteignable en un seul test (il faudrait {n}).', {w: when, n: fn(n)}) : t('{w} : au moins <b>{n}</b>.', {w: when, n: fn(n)});
       } else if (!l.id) need = l.v >= g.target ? t('Marge : +{d}', {d: (l.v - g.target).toFixed(1)}) : t('Il manque {d} point.', {d: (g.target - l.v).toFixed(1)});
       return `<div class="gline"><span>${esc(l.name)}</span><b class="num ${gcls(l.v)}" style="font-weight:500">${f1(l.v)}</b>
@@ -1093,7 +1113,7 @@ SCREENS.goals = () => {
   else if (goalsTab === 'goals'){
     body = `${state.goals.length ? state.goals.map(goalCard).join('') : `<p class="empty">${t("Aucun objectif pour l'instant.")}</p>`}
       <button class="btn primary" data-act="new-goal">${ui('plus', 18, 2)}${t('Nouvel objectif')}</button>
-      <span class="lab">${t("Coef utilisé s'il n'y a pas de test prévu dans le calendrier")}</span>${stepperHtml('goal-coef', goalCoef)}`;
+      ${weightBlock('goal', t("Coef utilisé s'il n'y a pas de test prévu dans le calendrier"), goalW.coef, goalW.pct)}`;
   } else {
     const p = curSem();
     sim.branchId = getB(sim.branchId) ? sim.branchId : state.branches[0]?.id; sim.q.branchId = getB(sim.q.branchId) ? sim.q.branchId : sim.branchId;
@@ -1104,18 +1124,18 @@ SCREENS.goals = () => {
     let qRes = '';
     const qt = parseNum(sim.q.target);
     if (qt != null && qt >= 1 && qt <= 6 && getB(sim.q.branchId)){
-      const n = neededNote(sim.q.branchId, qt, sim.q.coef, p);
+      const n = neededNote(sim.q.branchId, qt, sim.q, p);
       qRes = `<div class="card pad stack" style="align-items:center;text-align:center"><span class="hint">${t('Pour avoir {v} en {b} ce semestre', {v: qt.toFixed(1), b: esc(getB(sim.q.branchId).name)})}</span>
-        ${n > 6 ? `<span class="answer down">&gt; 6</span><span class="hint">${t('Pas possible avec un seul test ({c}). Il faudrait {n}.', {c: coefTxt(sim.q.coef), n: fn(n)})}</span>` : n <= 1 ? `<span class="answer up">${t('Assuré')}</span><span class="hint">${t('Même avec un 1, tu y es.')}</span>` : `<span class="answer num">${fn(n)}</span><span class="hint">${t('au minimum au prochain test ({c})', {c: coefTxt(sim.q.coef)})}</span>`}</div>`;
+        ${n > 6 ? `<span class="answer down">&gt; 6</span><span class="hint">${t('Pas possible avec un seul test ({c}). Il faudrait {n}.', {c: weightTxt(sim.q), n: fn(n)})}</span>` : n <= 1 ? `<span class="answer up">${t('Assuré')}</span><span class="hint">${t('Même avec un 1, tu y es.')}</span>` : `<span class="answer num">${fn(n)}</span><span class="hint">${t('au minimum au prochain test ({c})', {c: weightTxt(sim.q)})}</span>`}</div>`;
     }
     body = `<p class="hint">${t("Essaie des notes imaginaires. Rien n'est ajouté à tes vraies notes. Calculé pour : {p}.", {p: periodLabel(p)})}</p>
       <h2 class="h2">${t("Et si j'avais…")}</h2>
       <select class="field" data-in="sim-branch" aria-label="${t('Matière')}">${opts(sim.branchId)}</select>
       <div class="card stepper"><span></span><div class="sv"><input data-in="sim-value" inputmode="decimal" placeholder="–" value="${esc(sim.value)}" aria-label="${t('Note')}"><span class="unit">/ 6</span></div><span></span></div>
-      <span class="lab">${t('Coefficient')}</span>${stepperHtml('sim-coef', sim.coef)}
+      ${weightBlock('sim', t('Coefficient'), sim.coef, sim.pct)}
       ${sim.err ? `<p class="err">${esc(sim.err)}</p>` : ''}
       <button class="btn primary" data-act="sim-add">${ui('plus', 18, 2)}${t('Ajouter au simulateur')}</button>
-      ${sim.items.length ? `<div class="chips">${sim.items.map((i, k) => `<button class="chip" data-act="sim-rm" data-v="${k}">${esc(getB(i.branchId)?.abbr || '?')} ${fn(i.value)} · ${coefTxt(i.coef)} ✕</button>`).join('')}</div>
+      ${sim.items.length ? `<div class="chips">${sim.items.map((i, k) => `<button class="chip" data-act="sim-rm" data-v="${k}">${esc(getB(i.branchId)?.abbr || '?')} ${fn(i.value)} · ${weightTxt(i)} ✕</button>`).join('')}</div>
         <div class="card pad"><table class="cmp"><tbody>${row(`<b style="font-weight:500">${t('Moyenne générale')}</b>`, genAvg(p), genAvg(p, extra))}${row(t('Principales'), genAvg(p, [], true), genAvg(p, extra, true))}
         ${affected.map(id => row(esc(getB(id).name), bAvg(id, p), bAvg(id, p, extra))).join('')}</tbody></table></div>
         <button class="btn ghost sm" data-act="sim-clear" style="align-self:center">${t('Tout effacer')}</button>` : ''}
@@ -1123,7 +1143,7 @@ SCREENS.goals = () => {
       <select class="field" data-in="q-branch" aria-label="${t('Matière')}">${opts(sim.q.branchId)}</select>
       <span class="lab">${t('Moyenne voulue')}</span>
       <div class="card stepper"><span></span><div class="sv"><input data-in="q-target" inputmode="decimal" placeholder="4.5" value="${esc(sim.q.target)}" aria-label="${t('Moyenne voulue')}"><span class="unit">/ 6</span></div><span></span></div>
-      <span class="lab">${t('Coefficient du test')}</span>${stepperHtml('q-coef', sim.q.coef)}
+      ${weightBlock('q', t('Coefficient du test'), sim.q.coef, sim.q.pct)}
       ${qRes}`;
   }
   return `<h1 class="h1">${t('Objectifs')}</h1>${seg('goals-tab', [['goals',t('Objectifs')],['sim',t('Simulateur')],['focus',t('Focus')]], goalsTab)}${body}`;
@@ -1161,12 +1181,12 @@ function subjPage(id){
       ${ring(a, 'r-' + id + '-' + p)}
       <div class="ring-cap">${t('Moyenne actuelle')} ${tr != null ? trendHtml(tr) : ''}<small>${tr != null ? (p === 'Y' ? t("depuis le début de l'année") : t('depuis le début du semestre')) : periodLabel(p)}${b.main ? ' · ' + t('matière principale') : ''}${lp ? ' · ' + t('préférence {v}/10', {v: lp.value}) : ''}</small></div>
       <div class="stats">${[[t('Notes'), ns.length],[t('Intermédiaires'), typeCount(ns, 'int')],[t('Semestrielles'), typeCount(ns, 'sem')]].map(([l, v]) => `<div class="card stat"><span>${l}</span><b class="num">${v}</b></div>`).join('')}</div>
-      ${ne ? `<div class="card pad" style="display:flex;gap:12px;align-items:center"><span style="color:var(--accent-2)">${ui('bell', 20)}</span><span class="hint" style="color:var(--text)">${t('Prochain test : {e}, {d} · {c}', {e: esc(evTitle(ne)), d: dayName(ne.date), c: coefTxt(ne.coef || 1)})}</span></div>` : ''}
+      ${ne ? `<div class="card pad" style="display:flex;gap:12px;align-items:center"><span style="color:var(--accent-2)">${ui('bell', 20)}</span><span class="hint" style="color:var(--text)">${t('Prochain test : {e}, {d} · {c}', {e: esc(evTitle(ne)), d: dayName(ne.date), c: weightTxt({coef: ne.coef || 1, pct: ne.pct})})}</span></div>` : ''}
       ${ns.length > 1 ? `<h2 class="h2">${t('Mes notes')}</h2><div class="card" style="padding:12px 8px 6px">${areaChart(asc.map(n => n.value), {labels: asc.map(n => shortDate(n.date)), id: 'ng'})}<p class="hint" style="padding:4px 8px 6px">${t("Chaque point est une note, dans l'ordre où tu les as eues.")}</p></div>` : ''}
       ${run.length > 1 ? `<h2 class="h2">${t('Ma moyenne')}</h2><div class="card" style="padding:12px 8px 6px">${areaChart(run.map(q => q.y), {labels: run.map(q => shortDate(iso(new Date(q.x)))), id: 'dg'})}<p class="hint" style="padding:4px 8px 6px">${t('Ta moyenne après chaque nouvelle note.')}</p></div>` : ''}
       <h2 class="h2">${t('Dernières notes')}</h2>
       ${shown.length ? `<div>${shown.map(n => `<button class="srow card" data-act="edit-note" data-id="${n.id}" style="grid-template-columns:36px 1fr auto"><span class="ico sm">${ui(n.type === 'sem' ? 'target' : n.type === 'rec' ? 'pen' : 'doc', 16)}</span>
-        <span class="t"><b>${TYPES()[n.type] || t('Note')}${n.comment ? ' · ' + esc(n.comment) : ''}</b><small>${coefTxt(n.coef)}</small></span>
+        <span class="t"><b>${TYPES()[n.type] || t('Note')}${n.comment ? ' · ' + esc(n.comment) : ''}</b><small>${weightTxt(n)}</small></span>
         <span class="v num ${gcls(n.value)}">${fn(n.value)}<span class="of"> / 6</span><small>${dmy(n.date)}</small></span></button>`).join('')}</div>` : `<p class="empty">${t('Pas encore de note pour cette période.')}</p>`}
       ${ns.length > 4 ? `<button class="btn ghost" data-act="page-all">${pg.all ? t('Voir moins') : t('Voir tous les détails')}</button>` : ''}
       <button class="btn primary" data-act="new-note" data-b="${id}">${ui('plus', 18, 2)}${t('Ajouter une note')}</button>`;
@@ -1176,7 +1196,7 @@ function subjPage(id){
 function notePage(o = {}){
   const ed = o.note, ev = o.event;
   push({kind: 'note', ed, ev, del: false, err: '',
-    f: {branchId: ed ? ed.branchId : ev ? ev.branchId : (o.branchId || state.branches[0]?.id), value: ed ? fn(ed.value) : '', coef: ed ? ed.coef : ev ? (ev.coef || 1) : 1,
+    f: {branchId: ed ? ed.branchId : ev ? ev.branchId : (o.branchId || state.branches[0]?.id), value: ed ? fn(ed.value) : '', coef: ed ? ed.coef : ev ? (ev.coef || 1) : 1, pct: ed ? ed.pct || 0 : ev ? ev.pct || 0 : 0,
         date: ed ? ed.date : ev ? ev.date : today(), type: ed ? ed.type : ev ? (ev.type || 'int') : 'int', comment: ed ? ed.comment : ev ? (ev.title || '') : ''},
     render(pg){
       const f = pg.f, b = getB(f.branchId);
@@ -1190,7 +1210,7 @@ function notePage(o = {}){
         <div class="card stepper"><button class="sb" data-act="note-step" data-v="-1" aria-label="${t('Moins')}">${ui('minus', 18, 2)}</button>
           <div class="sv"><input data-in="note-value" inputmode="decimal" placeholder="–" value="${esc(f.value)}" aria-label="${t('Note')}"><span class="unit">/ 6</span></div>
           <button class="sb" data-act="note-step" data-v="1" aria-label="${t('Plus')}">${ui('plus', 18, 2)}</button></div>
-        <span class="lab">${t('Coefficient')}</span>${stepperHtml('note-coef', f.coef)}
+        ${weightBlock('note', t('Coefficient'), f.coef, f.pct)}
         <p class="preview" data-preview>${notePreview(pg)}</p>
         <span class="lab">${t('Commentaire (optionnel)')}</span>
         <textarea class="field" data-in="note-comment" placeholder="${t('Exemple : bonne participation, quelques erreurs…')}">${esc(f.comment)}</textarea>
@@ -1199,10 +1219,30 @@ function notePage(o = {}){
         ${ed ? `<button class="btn danger" data-act="note-del">${pg.del ? t('Confirmer : supprimer cette note') : t('Supprimer la note')}</button>` : ''}`;
     }});
 }
+/* Every place with a coefficient also offers a percentage of the semester average (0 = not used).
+   Each place is a key giving the object that holds its coef and pct. */
+const WEIGHTS = {note: () => cur().f, ev: () => cur().f, sim: () => sim, q: () => sim.q, goal: () => goalW};
+function weightBlock(k, label, coef, pct){
+  const mode = (v, l) => `<button class="${!pct === (v === 'coef') ? 'on' : ''}" data-act="w-mode" data-k="${k}" data-v="${v}">${l}</button>`;
+  return `<span class="lab">${label}</span><div class="seg">${mode('coef', t('En coefficient'))}${mode('pct', t('En pourcentage'))}</div>
+    ${!pct ? stepperHtml('w-coef', coef).replace(/data-act="w-coef"/g, `data-act="w-coef" data-k="${k}"`)
+    : `<div class="card pad stack" style="gap:10px"><div class="stepper" style="padding:0;border:0;background:none;box-shadow:none"><button class="sb" data-act="w-pct" data-k="${k}" data-v="-1" aria-label="${t('Moins')}">${ui('minus', 18, 2)}</button>
+      <div class="sv"><span style="font-size:28px;font-weight:300" class="num" data-pctv="${k}">${pct} %</span></div>
+      <button class="sb" data-act="w-pct" data-k="${k}" data-v="1" aria-label="${t('Plus')}">${ui('plus', 18, 2)}</button></div>
+      <input type="range" min="1" max="100" step="1" value="${pct}" data-in="w-pct" data-k="${k}" aria-label="${t('En pourcentage')}">
+      <span class="hint" data-pcth="${k}">${pctState(pct)}</span></div>`}`;
+}
+/* while the percentage slider moves: refresh its value and the note preview without re-rendering */
+function showPct(k){
+  const p = WEIGHTS[k]().pct, q = s => document.querySelector(s);
+  if (q(`[data-pctv="${k}"]`)) q(`[data-pctv="${k}"]`).textContent = p + ' %';
+  if (q(`[data-pcth="${k}"]`)) q(`[data-pcth="${k}"]`).textContent = pctState(p);
+  if (k === 'note' && q('[data-preview]')) q('[data-preview]').innerHTML = notePreview(cur());
+}
 function notePreview(pg){
   const f = pg.f, b = getB(f.branchId);
   const others = state.notes.filter(n => n.id !== pg.ed?.id && n.branchId === f.branchId && semOf(n.date) === semOf(f.date));
-  const v = parseNum(f.value), before = wavg(others), after = v != null && v >= 1 && v <= 6 ? wavg(others.concat([{value: v, coef: f.coef}])) : null;
+  const v = parseNum(f.value), before = semAvg(others), after = v != null && v >= 1 && v <= 6 ? semAvg(others.concat([{value: v, coef: f.coef, pct: f.pct}])) : null;
   return `${t('Moyenne {b} :', {b: esc(b ? b.name : '')})} <b>${f1(before)}</b>${after != null ? ` → <b class="${gcls(after)}">${f1(after)}</b>` : ''}`;
 }
 function pickSubjPage(onPick, curId){
@@ -1212,7 +1252,7 @@ function pickSubjPage(onPick, curId){
 function eventPage(e, presetDate){
   const ed = e;
   push({kind: 'event', ed, del: false, err: '',
-    f: ed ? {...ed} : {kind: 'eval', title: '', branchId: state.branches[0]?.id, date: presetDate || calSel, type: 'int', coef: 1, details: '', color: '#B48CFF', done: false},
+    f: ed ? {...ed} : {kind: 'eval', title: '', branchId: state.branches[0]?.id, date: presetDate || calSel, type: 'int', coef: 1, pct: 0, details: '', color: '#B48CFF', done: false},
     render(pg){
       const f = pg.f, b = getB(f.branchId);
       return `${phead(ed ? t('Modifier') : t('Nouvel événement'))}
@@ -1223,7 +1263,7 @@ function eventPage(e, presetDate){
         <button class="card frow" data-act="ev-pick"><span class="ico sm">${subjIcon(b, 17)}</span><span class="grow">${esc(b ? b.name : t('Aucune'))}</span>${ui('chev', 16, 2)}</button>` : `<button class="linkbtn" data-act="ev-pick">${t('Lier à une matière')}</button>`}
         <span class="lab">${t('Date')}</span>
         <label class="card frow"><span style="color:var(--muted)">${ui('cal', 20)}</span><span class="grow"><input type="date" data-in="ev-date" value="${f.date}" aria-label="${t('Date')}"></span></label>
-        ${f.kind === 'eval' ? `<span class="lab">${t('Type')}</span>${seg('ev-type', [['rec',t('Récitation')],['int',t('Intermédiaire')],['sem',t('Semestrielle')]], f.type)}<span class="lab">${t('Coefficient')}</span>${stepperHtml('ev-coef', f.coef)}` : ''}
+        ${f.kind === 'eval' ? `<span class="lab">${t('Type')}</span>${seg('ev-type', [['rec',t('Récitation')],['int',t('Intermédiaire')],['sem',t('Semestrielle')]], f.type)}${weightBlock('ev', t('Coefficient'), f.coef, f.pct)}` : ''}
         ${f.kind === 'autre' ? `<span class="lab">${t('Couleur')}</span><div class="chips">${['#B48CFF','#3FD4E0','#FF6FA8','#A6E05A','#FF7A59','#E8C35A'].map(c => `<button class="swatch ${f.color === c ? 'on' : ''}" style="background:${c};color:${c}" data-act="ev-color" data-v="${c}" aria-label="${t('Couleur')}"></button>`).join('')}</div>` : ''}
         <span class="lab">${t('Détails (optionnel)')}</span>
         <textarea class="field" data-in="ev-details" placeholder="${f.kind === 'eval' ? t('Chapitres 3 à 5, vocabulaire…') : t('Notes')}">${esc(f.details)}</textarea>
@@ -1311,6 +1351,7 @@ function backupPage(){
 function howtoPage(){
   push({render(){ return `${phead(t("Comment c'est calculé"))}<div class="card pad"><ul class="list-plain">
     <li>${t("Moyenne d'une matière : on additionne (note × coefficient) et on divise par la somme des coefficients. Arrondi au dixième : 5.15 → 5.2.")}</li>
+    <li>${t("Note en pourcentage (par ex. 57 %) : elle compte pour exactement ce pourcentage de la moyenne du semestre. Les notes avec coefficient se partagent le reste. Tant qu'il n'y a que des notes en pourcentage, la moyenne se calcule entre elles.")}</li>
     <li>${t('Moyenne générale : moyenne des moyennes des matières qui ont au moins une note, arrondie au dixième.')}</li>
     <li>${t('Ø principales : pareil, seulement avec les matières principales.')}</li>
     <li>${t('Année : pour chaque matière, moyenne du 1er et du 2e semestre ; puis la moyenne de ces moyennes.')}</li>
@@ -1342,7 +1383,7 @@ function mgPage(){
       <p class="hint">${t('Comment chaque note a changé ta moyenne générale.')}</p>
       ${shown.length ? `<div>${shown.map(h => { const b = getB(h.n.branchId), d = h.before == null ? null : r1(h.after - h.before);
         return `<button class="srow card" data-act="edit-note" data-id="${h.n.id}" style="grid-template-columns:36px 1fr auto"><span class="ico sm">${subjIcon(b, 16)}</span>
-          <span class="t"><b>${esc(b ? b.name : '?')} · ${fn(h.n.value)}</b><small>${dmy(h.n.date)} · ${TYPES()[h.n.type] || ''} · ${coefTxt(h.n.coef)}</small></span>
+          <span class="t"><b>${esc(b ? b.name : '?')} · ${fn(h.n.value)}</b><small>${dmy(h.n.date)} · ${TYPES()[h.n.type] || ''} · ${weightTxt(h.n)}</small></span>
           <span class="v num">${h.before == null ? `<small>${t('Première note')}</small>${f1(h.after)}` : `${f1(h.before)} → ${f1(h.after)}<small>${trendHtml(d)}</small>`}</span></button>`; }).join('')}</div>` : `<p class="empty">${t('Pas encore de note pour cette période.')}</p>`}
       ${hist.length > 8 ? `<button class="btn ghost" data-act="page-all">${pg.all ? t('Voir moins') : t("Voir tout l'historique")}</button>` : ''}`;
   }});
@@ -1408,7 +1449,10 @@ const A = {
   'chart-mg': () => { chartSel.mg = !chartSel.mg; renderAll(); },
   'chart-sel': d => { chartSel.set.has(d.id) ? chartSel.set.delete(d.id) : chartSel.set.add(d.id); renderAll(); },
   'note-type': d => { cur().f.type = d.v; renderAll(); },
-  'note-coef': d => { cur().f.coef = stepCoef(cur().f.coef, +d.v); renderAll(); },
+  'w-coef': d => { const w = WEIGHTS[d.k](); w.coef = stepCoef(w.coef || 1, +d.v); renderAll(); },
+  'w-pct': d => { const w = WEIGHTS[d.k](); w.pct = Math.max(1, Math.min(100, (w.pct || 0) + +d.v)); renderAll(); },
+  /* switching back to the coefficient keeps the percentage aside, so switching again brings it back */
+  'w-mode': d => { const w = WEIGHTS[d.k](); if (d.v === 'pct') w.pct = w.pct || w.lastPct || 50; else if (w.pct){ w.lastPct = w.pct; w.pct = 0; } renderAll(); },
   'note-step': d => { const f = cur().f, v = parseNum(f.value); const nv = v == null ? 4 : Math.min(6, Math.max(1, Math.round((v + 0.5 * d.v) * 2) / 2)); f.value = fn(nv); renderAll(); },
   'pick-subj': () => { const pg = cur(); pickSubjPage(id => { pg.f.branchId = id; }, pg.f.branchId); },
   pick: d => { const pg = cur(); pg.onPick(d.id); pop(); },
@@ -1416,9 +1460,9 @@ const A = {
     const pg = cur(), f = pg.f, v = parseNum(f.value);
     if (!getB(f.branchId)){ pg.err = t('Choisis une matière.'); renderAll(); return; }
     if (v == null || v < 1 || v > 6){ pg.err = t('La note doit être entre 1 et 6 (par ex. 4.5).'); renderAll(); return; }
-    const val = Math.round(v * 100) / 100, data = {branchId: f.branchId, value: val, coef: f.coef, date: f.date, type: f.type, comment: f.comment.trim()};
+    const val = Math.round(v * 100) / 100, data = {branchId: f.branchId, value: val, coef: f.coef, pct: f.pct || 0, date: f.date, type: f.type, comment: f.comment.trim()};
     let id;
-    if (pg.ed){ const prev = {value: pg.ed.value, coef: pg.ed.coef, date: pg.ed.date, branchId: pg.ed.branchId}; Object.assign(pg.ed, data); id = pg.ed.id; logNote('edit', pg.ed, prev); } else { id = nid(); state.notes.push({id, ...data}); logNote('add', {id, ...data}); }
+    if (pg.ed){ const prev = {value: pg.ed.value, coef: pg.ed.coef, pct: pg.ed.pct || 0, date: pg.ed.date, branchId: pg.ed.branchId}; Object.assign(pg.ed, data); id = pg.ed.id; logNote('edit', pg.ed, prev); } else { id = nid(); state.notes.push({id, ...data}); logNote('add', {id, ...data}); }
     if (pg.ev) pg.ev.noteId = id;
     pop(); commit();
     toast(t(pg.ed ? 'Note modifiée : {v} en {b} · moyenne {m}' : 'Note ajoutée : {v} en {b} · moyenne {m}', {v: fn(val), b: getB(f.branchId).name, m: f1(bAvg(f.branchId, semOf(f.date)))}));
@@ -1447,14 +1491,13 @@ const A = {
   'edit-event': d => { const e = state.events.find(x => x.id === d.id); if (e) eventPage(e); },
   'ev-kind': d => { cur().f.kind = d.v; renderAll(); },
   'ev-type': d => { cur().f.type = d.v; renderAll(); },
-  'ev-coef': d => { cur().f.coef = stepCoef(cur().f.coef || 1, +d.v); renderAll(); },
   'ev-color': d => { cur().f.color = d.v; renderAll(); },
   'ev-pick': () => { const pg = cur(); pickSubjPage(id => { pg.f.branchId = id; }, pg.f.branchId); },
   'ev-save': () => {
     const pg = cur(), f = pg.f;
     if (f.kind !== 'autre' && !getB(f.branchId)){ pg.err = t('Choisis une matière.'); renderAll(); return; }
     if (f.kind === 'autre' && !f.title.trim()){ pg.err = t("Donne un titre à l'événement."); renderAll(); return; }
-    const data = {kind: f.kind, title: f.title.trim(), branchId: f.branchId || null, date: f.date, type: f.type || 'int', coef: f.coef || 1, details: (f.details || '').trim(), color: f.color, done: !!f.done};
+    const data = {kind: f.kind, title: f.title.trim(), branchId: f.branchId || null, date: f.date, type: f.type || 'int', coef: f.coef || 1, pct: f.pct || 0, details: (f.details || '').trim(), color: f.color, done: !!f.done};
     if (pg.ed) Object.assign(pg.ed, data); else state.events.push({id: nid(), noteId: null, createdAt: today(), ...data});
     calSel = f.date; calMonth = f.date.slice(0, 7);
     pop(); commit(); toast(pg.ed ? t('Événement modifié') : t('Ajouté au calendrier'));
@@ -1466,7 +1509,6 @@ const A = {
   'cal-day': d => { calSel = d.d; if (d.d.slice(0, 7) !== calMonth) calMonth = d.d.slice(0, 7); renderAll(); },
   'cal-month': d => { const [y, m] = calMonth.split('-').map(Number); calMonth = iso(new Date(y, m - 1 + +d.v, 1)).slice(0, 7); renderAll(); },
   'goals-tab': d => { goalsTab = d.v; renderAll(); },
-  'goal-coef': d => { goalCoef = stepCoef(goalCoef, +d.v); renderAll(); },
   'new-goal': () => goalPage(),
   'del-goal': d => { state.goals = state.goals.filter(g => g.id !== d.id); commit(); toast(t('Objectif supprimé')); },
   'g-kind': d => { cur().f.kind = d.v; renderAll(); },
@@ -1479,9 +1521,7 @@ const A = {
     state.goals.push({id: nid(), kind: f.kind, branchIds: f.kind === 'branch' ? f.branchIds.slice() : [], target: r1(v), period: f.period});
     pop(); commit(); toast(t('Objectif créé'));
   },
-  'sim-coef': d => { sim.coef = stepCoef(sim.coef, +d.v); renderAll(); },
-  'q-coef': d => { sim.q.coef = stepCoef(sim.q.coef, +d.v); renderAll(); },
-  'sim-add': () => { const v = parseNum(sim.value); if (v == null || v < 1 || v > 6){ sim.err = t('La note doit être entre 1 et 6.'); renderAll(); return; } sim.err = ''; sim.items.push({branchId: sim.branchId, value: Math.round(v * 100) / 100, coef: sim.coef}); sim.value = ''; renderAll(); },
+  'sim-add': () => { const v = parseNum(sim.value); if (v == null || v < 1 || v > 6){ sim.err = t('La note doit être entre 1 et 6.'); renderAll(); return; } sim.err = ''; sim.items.push({branchId: sim.branchId, value: Math.round(v * 100) / 100, coef: sim.coef, pct: sim.pct}); sim.value = ''; renderAll(); },
   'sim-rm': d => { sim.items.splice(+d.v, 1); renderAll(); },
   'sim-clear': () => { sim.items = []; renderAll(); },
   'open-prefs': () => prefsPage(),
@@ -1533,6 +1573,7 @@ document.addEventListener('input', e => {
   const k = e.target.dataset && e.target.dataset.in; if (!k) return;
   const v = e.target.value, pg = cur();
   if (k === 'note-value'){ pg.f.value = v; const el = document.querySelector('[data-preview]'); if (el) el.innerHTML = notePreview(pg); }
+  else if (k === 'w-pct'){ const w = e.target.dataset.k; WEIGHTS[w]().pct = +v; showPct(w); }
   else if (k === 'note-comment') pg.f.comment = v;
   else if (k === 'ev-title') pg.f.title = v;
   else if (k === 'ev-details') pg.f.details = v;
@@ -1550,9 +1591,10 @@ document.addEventListener('change', e => {
   const v = e.target.value, pg = cur();
   if (k === 'note-date'){ pg.f.date = v || today(); renderAll(); }
   else if (k === 'ev-date'){ pg.f.date = v || today(); }
-  else if (k === 'sim-branch') sim.branchId = v;
+  else if (k === 'sim-branch'){ sim.branchId = v; renderAll(); }
   else if (k === 'q-branch'){ sim.q.branchId = v; renderAll(); }
   else if (k === 'q-target'){ renderAll(); }
+  else if (k === 'w-pct') renderAll();
   else if (k === 's2'){ state.s2Start = v || null; view = curSem(); commit(); toast(state.s2Start ? t('2e semestre dès le {d}', {d: dmy(state.s2Start)}) : t('Date retirée')); }
   else if (k === 'bk-file' && e.target.files[0]){
     const r = new FileReader();
@@ -1740,14 +1782,13 @@ function md(s){
   return out.replace(/(<br>)+$/, '');
 }
 function logNote(action, n, prev){
-  state.log.push({id: nid(), at: new Date().toISOString(), action, noteId: n.id, branchId: n.branchId, value: n.value, coef: n.coef, date: n.date, type: n.type, prev: prev || null});
+  state.log.push({id: nid(), at: new Date().toISOString(), action, noteId: n.id, branchId: n.branchId, value: n.value, coef: n.coef, pct: n.pct || 0, date: n.date, type: n.type, prev: prev || null});
   if (state.log.length > 600) state.log = state.log.slice(-600);
 }
 /* averages for any set of notes (used for archived years) */
 function avgEngine(notes, s2, branches){
   const so = d => (s2 && d >= s2) ? 2 : 1;
-  const w = ns => { if (!ns.length) return null; let a = 0, c = 0; ns.forEach(n => { a += n.value * n.coef; c += n.coef; }); return r1(a / c); };
-  const b = (bid, p, upto) => { const f = s => w(notes.filter(n => n.branchId === bid && so(n.date) === s && (!upto || n.date <= upto))); if (p === 'Y'){ const x = f(1), y = f(2); return x == null ? y : y == null ? x : r1((x + y) / 2); } return f(p); };
+  const b = (bid, p, upto) => { const f = s => semAvg(notes.filter(n => n.branchId === bid && so(n.date) === s && (!upto || n.date <= upto))); if (p === 'Y'){ const x = f(1), y = f(2); return x == null ? y : y == null ? x : r1((x + y) / 2); } return f(p); };
   const mg = (p, upto, mainOnly) => mean(branches.filter(x => !mainOnly || x.main).map(x => b(x.id, p, upto)));
   return {b, mg, semOf: so};
 }
@@ -1888,8 +1929,8 @@ function goalNeedText(g, l){
   const finished = g.period === 1 && curSem() === 2;
   if (l.v == null) return t('Pas encore de note.');
   if (l.id && !finished){
-    const ne = nextEval(l.id, g.period), coef = ne ? (ne.coef || 1) : goalCoef, n = neededNote(l.id, g.target, coef, g.period);
-    const when = ne ? t('Prochain test le {d} ({c})', {d: dmy(ne.date), c: coefTxt(coef)}) : t('Prochain test ({c})', {c: coefTxt(coef)});
+    const ne = nextEval(l.id, g.period), w = ne ? {coef: ne.coef || 1, pct: ne.pct || 0} : goalW, n = neededNote(l.id, g.target, w, g.period);
+    const when = ne ? t('Prochain test le {d} ({c})', {d: dmy(ne.date), c: weightTxt(w)}) : t('Prochain test ({c})', {c: weightTxt(w)});
     return n <= 1 ? t('{w} : déjà assuré.', {w: when}) : n > 6 ? t('{w} : pas atteignable en un seul test (il faudrait {n}).', {w: when, n: fn(n)}) : t('{w} : au moins <b>{n}</b>.', {w: when, n: fn(n)});
   }
   return l.v >= g.target ? t('Marge : +{d}', {d: (l.v - g.target).toFixed(1)}) : t('Il manque {d} point.', {d: (g.target - l.v).toFixed(1)});
@@ -1928,7 +1969,7 @@ function timelineHtml(){
   push2(yearStart(), 'var(--accent)', t('Rentrée scolaire'));
   if (state.s2Start) push2(state.s2Start, 'var(--accent)', t('Début du 2e semestre'));
   [['dec', t('Semestrielles de décembre')], ['jun', t('Semestrielles de juin')]].forEach(([k, l]) => { const s = state.sessions[k]; if (s) push2(s, 'var(--warn)', l, t('Du {a} au {b}', {a: dmy(s), b: dmy(addDays(s, 13))})); });
-  state.notes.filter(n => n.type === 'sem').forEach(n => push2(n.date, '#B48CFF', t('Semestrielle : {b}', {b: esc(getB(n.branchId)?.name || '?')}), `${fn(n.value)} / 6 · ${coefTxt(n.coef)}`));
+  state.notes.filter(n => n.type === 'sem').forEach(n => push2(n.date, '#B48CFF', t('Semestrielle : {b}', {b: esc(getB(n.branchId)?.name || '?')}), `${fn(n.value)} / 6 · ${weightTxt(n)}`));
   state.events.filter(e => e.kind === 'eval' && e.type === 'sem' && !e.noteId && getB(e.branchId)).forEach(e => push2(e.date, 'var(--dim)', t('Semestrielle prévue : {b}', {b: esc(getB(e.branchId).name)}), esc(e.title || '')));
   const pn = state.notes.map((n, i) => ({n, i})).sort((a, b) => a.n.date < b.n.date ? -1 : a.n.date > b.n.date ? 1 : a.i - b.i).map(x => x.n);
   pn.forEach((n, k) => { if (!k) return; const a = mgFrom(pn.slice(0, k), 'Y'), b = mgFrom(pn.slice(0, k + 1), 'Y');
@@ -2137,7 +2178,7 @@ function weekPage(){
           : `<p class="hint">${t("L'IA écrit un petit résumé de ta semaine à partir de tes notes.")}</p><button class="btn primary sm" data-act="week-ai" style="align-self:flex-start">${ui('spark', 16)}${t('Générer le résumé')}</button>`}
         ${wk.err ? `<p class="err">${esc(wk.err)}</p>` : ''}</div>
       <h2 class="h2">${t('Notes de la semaine')}</h2>
-      ${st.notes.length ? `<div>${st.notes.map(n => `<button class="srow card" data-act="edit-note" data-id="${n.id}" style="grid-template-columns:36px 1fr auto"><span class="ico sm">${subjIcon(getB(n.branchId), 16)}</span><span class="t"><b>${esc(getB(n.branchId)?.name || '?')}</b><small>${dayName(n.date)} · ${TYPES()[n.type] || ''} · ${coefTxt(n.coef)}</small></span><span class="v num ${gcls(n.value)}">${fn(n.value)}<span class="of"> / 6</span></span></button>`).join('')}</div>` : `<p class="hint">${t('Aucune note cette semaine.')}</p>`}
+      ${st.notes.length ? `<div>${st.notes.map(n => `<button class="srow card" data-act="edit-note" data-id="${n.id}" style="grid-template-columns:36px 1fr auto"><span class="ico sm">${subjIcon(getB(n.branchId), 16)}</span><span class="t"><b>${esc(getB(n.branchId)?.name || '?')}</b><small>${dayName(n.date)} · ${TYPES()[n.type] || ''} · ${weightTxt(n)}</small></span><span class="v num ${gcls(n.value)}">${fn(n.value)}<span class="of"> / 6</span></span></button>`).join('')}</div>` : `<p class="hint">${t('Aucune note cette semaine.')}</p>`}
       ${ups.length ? `<h2 class="h2">${t('En progression')}</h2><div class="card pad stack">${ups.map(x => `<div class="dv" style="grid-template-columns:1fr auto"><span>${esc(x.b.name)}</span><b class="num up">${f1(x.a)} → ${f1(x.c)}</b></div>`).join('')}</div>` : ''}
       ${downs.length ? `<h2 class="h2">${t('À surveiller')}</h2><div class="card pad stack">${downs.map(x => `<div class="dv" style="grid-template-columns:1fr auto"><span>${esc(x.b.name)}</span><b class="num ${x.c < 4 ? 'down' : ''}">${f1(x.a)} → ${f1(x.c)}</b></div>`).join('')}</div>` : ''}
       <h2 class="h2">${t('La semaine suivante')}</h2>
@@ -2180,7 +2221,7 @@ function historyPage(){
       body = L.length ? `<div>${L.slice(0, 200).map(e => { const b = getB(e.branchId), when = new Date(e.at);
         const val = e.action === 'edit' && e.prev ? `${fn(e.prev.value)} → ${fn(e.value)}` : fn(e.value);
         return `<div class="srow card" style="grid-template-columns:36px 1fr auto"><span class="ico sm" style="${e.action === 'del' ? 'color:var(--down)' : ''}">${ui(ic[e.action], 16, 2)}</span>
-          <span class="t"><b>${lab[e.action]} · ${esc(b ? b.name : '?')}</b><small>${t('Test du {d}', {d: dmy(e.date)})} · ${coefTxt(e.coef)}</small></span>
+          <span class="t"><b>${lab[e.action]} · ${esc(b ? b.name : '?')}</b><small>${t('Test du {d}', {d: dmy(e.date)})} · ${weightTxt(e)}</small></span>
           <span class="v num">${val}<small>${dmy(iso(when))} ${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}</small></span></div>`; }).join('')}</div>`
         : `<p class="empty">${t('Aucune modification enregistrée pour l\'instant. Chaque ajout, modification ou suppression de note apparaîtra ici.')}</p>`;
     } else {
@@ -2329,7 +2370,7 @@ async function buildPdf(p){
   h2(t('Détail des notes'));
   rows.forEach(r => {
     need(12); doc.setFont('helvetica', 'bold'); doc.setFontSize(10); col(NAVY); txt(r.b.name + ' - ' + t('moyenne {v}', {v: f1(r.a)}), 14, y); doc.setFont('helvetica', 'normal'); y += 5;
-    notesOf(r.b.id, p).sort((a, b) => a.date < b.date ? -1 : 1).forEach(n => { need(5); doc.setFontSize(9); col(GREY); txt(dmy(n.date), 18, y); txt(TYPES()[n.type] || '', 42, y); col(n.value < 4 ? RED : NAVY); txt(fn(n.value), 82, y); col(GREY); txt(coefTxt(n.coef), 96, y); if (n.comment) txt(n.comment.length > 60 ? n.comment.slice(0, 59) + '...' : n.comment, 120, y); y += 4.6; });
+    notesOf(r.b.id, p).sort((a, b) => a.date < b.date ? -1 : 1).forEach(n => { need(5); doc.setFontSize(9); col(GREY); txt(dmy(n.date), 18, y); txt(TYPES()[n.type] || '', 42, y); col(n.value < 4 ? RED : NAVY); txt(fn(n.value), 82, y); col(GREY); txt(weightTxt(n), 96, y); if (n.comment) txt(n.comment.length > 60 ? n.comment.slice(0, 59) + '...' : n.comment, 120, y); y += 4.6; });
     y += 2;
   });
   const pages = doc.getNumberOfPages();
@@ -2607,7 +2648,7 @@ function ckSource(){
   ];
   state.branches.forEach(b => out.push({group: t('Matières'), label: b.name, sub: `${b.abbr} · ${f1(bAvg(b.id, view))} / 6`, iconHtml: subjIcon(b, 17), run: () => subjPage(b.id), kw: b.abbr}));
   state.notes.slice().sort((a, c) => a.date < c.date ? 1 : -1).forEach(n => { const b = getB(n.branchId); if (!b) return;
-    out.push({group: t('Notes'), label: `${b.name} · ${fn(n.value)}`, sub: `${dmy(n.date)} · ${TYPES()[n.type] || ''} · ${coefTxt(n.coef)}${n.comment ? ' · ' + n.comment : ''}`, iconHtml: subjIcon(b, 17), run: () => notePage({note: n}), kw: `${b.abbr} ${fn(n.value)} ${String(n.value).replace('.', ',')} ${dmy(n.date)} ${n.comment || ''}`, deep: true}); });
+    out.push({group: t('Notes'), label: `${b.name} · ${fn(n.value)}`, sub: `${dmy(n.date)} · ${TYPES()[n.type] || ''} · ${weightTxt(n)}${n.comment ? ' · ' + n.comment : ''}`, iconHtml: subjIcon(b, 17), run: () => notePage({note: n}), kw: `${b.abbr} ${fn(n.value)} ${String(n.value).replace('.', ',')} ${dmy(n.date)} ${n.comment || ''}`, deep: true}); });
   state.events.slice().sort((a, c) => a.date < c.date ? -1 : 1).forEach(e => out.push({group: t('Calendrier'), label: evTitle(e), sub: `${evKind(e)} · ${dayName(e.date)}${getB(e.branchId) ? ' · ' + getB(e.branchId).name : ''}`, icon: 'cal', run: () => eventPage(e), kw: `${getB(e.branchId)?.name || ''} ${dmy(e.date)}`, deep: true}));
   return out;
 }
@@ -2873,6 +2914,97 @@ window.addEventListener('resize', () => placePill(true));
   bar.addEventListener('pointercancel', end);
   /* a drag must not also count as a tap on the tab it ends on */
   document.addEventListener('click', e => { if (Date.now() - suppress < 350 && e.target.closest && e.target.closest('#tabs')){ e.stopPropagation(); e.preventDefault(); } }, true);
+})();
+
+Object.assign(I18N.en, {
+'{p} % de la moyenne':'{p} % of the average','En coefficient':'As a weight','En pourcentage':'As a percentage',
+'{p} % de la moyenne du semestre. Les notes avec coefficient se partagent le reste.':'{p} % of the semester average. The grades with a weight share the rest.',
+"Note en pourcentage (par ex. 57 %) : elle compte pour exactement ce pourcentage de la moyenne du semestre. Les notes avec coefficient se partagent le reste. Tant qu'il n'y a que des notes en pourcentage, la moyenne se calcule entre elles.":'Grade as a percentage (e.g. 57 %): it counts for exactly that share of the semester average. The grades with a weight share the rest. As long as there are only percentage grades, the average is calculated between them.'
+});
+Object.assign(I18N.de, {
+'{p} % de la moyenne':'{p} % des Durchschnitts','En coefficient':'Als Gewicht','En pourcentage':'In Prozent',
+'{p} % de la moyenne du semestre. Les notes avec coefficient se partagent le reste.':'{p} % des Semesterdurchschnitts. Die Noten mit Gewicht teilen sich den Rest.',
+"Note en pourcentage (par ex. 57 %) : elle compte pour exactement ce pourcentage de la moyenne du semestre. Les notes avec coefficient se partagent le reste. Tant qu'il n'y a que des notes en pourcentage, la moyenne se calcule entre elles.":'Note in Prozent (z. B. 57 %): Sie zählt genau diesen Anteil des Semesterdurchschnitts. Die Noten mit Gewicht teilen sich den Rest. Solange es nur Noten in Prozent gibt, wird der Durchschnitt zwischen ihnen berechnet.'
+});
+
+/* ================= v9: swipe from the left edge to go back ================= */
+/* Like on iPhone: put the finger on the left edge of a page and drag it to the right.
+   The page follows the finger, the previous screen shows underneath, and letting go
+   past a third of the screen (or with a quick flick) does the same as the back arrow. */
+(() => {
+  const EDGE = 28, DUR = 260, EASE = 'cubic-bezier(.2,.8,.2,1)';
+  let s = null;
+  const blocked = () => document.querySelector('.qa:not([hidden]), .cmdk:not([hidden])');
+  function start(){
+    const page = $('#page'), W = innerWidth;
+    page.style.animation = 'none'; page.style.transition = 'none'; page.style.boxShadow = '-10px 0 28px rgba(0,0,0,.4)';
+    s.shade = document.createElement('div');
+    s.shade.style.cssText = 'position:fixed;inset:0;z-index:29;background:#000;opacity:.35;pointer-events:none';
+    document.body.appendChild(s.shade);
+    if (pages.length > 1){
+      /* the previous page is not on screen: draw it once underneath, at the place it was left */
+      const p = pages[pages.length - 2];
+      s.under = document.createElement('div');
+      s.under.className = 'page';
+      s.under.style.cssText = 'z-index:28;animation:none;pointer-events:none';
+      try { s.under.innerHTML = `<div class="screen">${p.render(p)}</div>`; } catch(_){}
+      document.body.appendChild(s.under);
+      s.under.scrollTop = p._st || 0;
+    } else s.under = $('#main');
+    s.under.style.transition = 'none';
+    s.W = W;
+  }
+  function move(dx){
+    const k = dx / s.W;
+    $('#page').style.transform = `translateX(${dx}px)`;
+    s.shade.style.opacity = .35 * (1 - k);
+    s.under.style.transform = `translateX(${-.3 * s.W * (1 - k)}px)`;
+  }
+  function finish(back){
+    const page = $('#page'), d = s; s = null;
+    const tr = `transform ${DUR}ms ${EASE}`;
+    page.style.transition = tr; d.under.style.transition = tr; d.shade.style.transition = `opacity ${DUR}ms ${EASE}`;
+    page.style.transform = back ? `translateX(${d.W}px)` : '';
+    d.under.style.transform = back ? '' : `translateX(${-.3 * d.W}px)`;
+    d.shade.style.opacity = back ? 0 : .35;
+    setTimeout(() => {
+      page.style.transition = page.style.transform = page.style.boxShadow = '';
+      d.shade.remove();
+      if (d.under.id === 'main') d.under.style.transition = d.under.style.transform = '';
+      else d.under.remove();
+      if (back) pop();
+    }, DUR);
+  }
+  document.addEventListener('touchstart', e => {
+    if (s || $('#page').hidden || !pages.length || e.touches.length > 1 || blocked()) return;
+    const tc = e.touches[0];
+    if (tc.clientX > EDGE) return;
+    s = {x0: tc.clientX, y0: tc.clientY, on: false, dx: 0, v: 0, lx: tc.clientX, lt: performance.now()};
+  }, {passive: true});
+  document.addEventListener('touchmove', e => {
+    if (!s) return;
+    const tc = e.touches[0], dx = tc.clientX - s.x0, dy = tc.clientY - s.y0;
+    if (!s.on){
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      /* mostly vertical: it is a normal scroll, not a swipe */
+      if (Math.abs(dy) > Math.abs(dx) || dx < 0){ s = null; return; }
+      s.on = true; start();
+    }
+    e.preventDefault();
+    const now = performance.now();
+    s.v = (tc.clientX - s.lx) / Math.max(1, now - s.lt); s.lx = tc.clientX; s.lt = now;
+    s.dx = Math.max(0, dx);
+    move(s.dx);
+  }, {passive: false});
+  const end = () => {
+    if (!s) return;
+    if (!s.on){ s = null; return; }
+    /* a flick counts only if the finger was still moving when it left the screen */
+    const flick = s.v > .45 && s.dx > 20 && performance.now() - s.lt < 100;
+    finish(s.dx > s.W * .35 || flick);
+  };
+  document.addEventListener('touchend', end);
+  document.addEventListener('touchcancel', end);
 })();
 
 /* standalone: no AI yet, so the orb stays calm instead of showing an error until someone actually asks */

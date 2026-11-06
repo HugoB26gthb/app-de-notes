@@ -1,6 +1,6 @@
 /* Service worker: keeps the app working without internet.
    VERSION changes at every build, so phones pick up the new version on their next visit. */
-const VERSION = '20261104-191626';
+const VERSION = '20261106-120208';
 const CACHE = 'app-' + VERSION;
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'icons/maskable-512.png'];
 
